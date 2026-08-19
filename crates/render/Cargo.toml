@@ -1,0 +1,10 @@
+[package]
+name = "aetherlight-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+wgpu = { package = "wgpu", workspace = true }
