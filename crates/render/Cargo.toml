@@ -7,4 +7,4 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
-wgpu = { package = "wgpu", workspace = true }
+wgpu.workspace = true
