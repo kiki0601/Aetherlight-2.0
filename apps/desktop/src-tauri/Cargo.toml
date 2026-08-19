@@ -1,0 +1,16 @@
+[package]
+name = "aetherlight-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+aetherlight-core = { path = "../../../crates/core" }
+aetherlight-render = { path = "../../../crates/render" }
+aetherlight-raw = { path = "../../../crates/raw" }
+aetherlight-masks = { path = "../../../crates/masks" }
+aetherlight-catalog = { path = "../../../crates/catalog" }
+aetherlight-export = { path = "../../../crates/export" }
