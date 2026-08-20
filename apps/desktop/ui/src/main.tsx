@@ -1,11 +1,23 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 type View = "library" | "develop";
-type AdjustmentKey = "exposure" | "contrast" | "highlights" | "shadows" | "whites" | "blacks" | "temperature" | "tint" | "vibrance" | "saturation";
+type AdjustmentKey =
+  | "exposure"
+  | "contrast"
+  | "highlights"
+  | "shadows"
+  | "whites"
+  | "blacks"
+  | "temperature"
+  | "tint"
+  | "vibrance"
+  | "saturation";
 
 type Adjustments = Record<AdjustmentKey, number>;
+
+type Control = [AdjustmentKey, string, number, number, number];
 
 const DEFAULT_ADJUSTMENTS: Adjustments = {
   exposure: 0,
@@ -20,7 +32,7 @@ const DEFAULT_ADJUSTMENTS: Adjustments = {
   saturation: 0,
 };
 
-const BASIC_CONTROLS: Array<[AdjustmentKey, string, number, number, number]> = [
+const BASIC_CONTROLS: Control[] = [
   ["exposure", "Exposure", -5, 5, 0.01],
   ["contrast", "Contrast", -100, 100, 1],
   ["highlights", "Highlights", -100, 100, 1],
@@ -29,7 +41,7 @@ const BASIC_CONTROLS: Array<[AdjustmentKey, string, number, number, number]> = [
   ["blacks", "Blacks", -100, 100, 1],
 ];
 
-const COLOR_CONTROLS: Array<[AdjustmentKey, string, number, number, number]> = [
+const COLOR_CONTROLS: Control[] = [
   ["temperature", "Temperature", -100, 100, 1],
   ["tint", "Tint", -100, 100, 1],
   ["vibrance", "Vibrance", -100, 100, 1],
@@ -40,6 +52,110 @@ function formatValue(value: number, step: number) {
   return step < 1 ? value.toFixed(2) : Math.round(value).toString();
 }
 
+function clamp(value: number, min = 0, max = 255) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function smoothstep(edge0: number, edge1: number, value: number) {
+  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function applyAdjustments(source: ImageData, adjustments: Adjustments) {
+  const data = source.data;
+  const exposureFactor = Math.pow(2, adjustments.exposure);
+  const contrast = 1 + adjustments.contrast / 100;
+  const saturation = 1 + adjustments.saturation / 100;
+  const vibrance = adjustments.vibrance / 100;
+  const temperature = adjustments.temperature / 100;
+  const tint = adjustments.tint / 100;
+  const highlightAmount = adjustments.highlights / 100;
+  const shadowAmount = adjustments.shadows / 100;
+  const whiteAmount = adjustments.whites / 100;
+  const blackAmount = adjustments.blacks / 100;
+
+  for (let i = 0; i < data.length; i += 4) {
+    let r = data[i];
+    let g = data[i + 1];
+    let b = data[i + 2];
+
+    r *= exposureFactor;
+    g *= exposureFactor;
+    b *= exposureFactor;
+
+    const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    const shadowWeight = 1 - smoothstep(0.15, 0.55, luminance);
+    const highlightWeight = smoothstep(0.45, 0.9, luminance);
+
+    if (shadowAmount >= 0) {
+      const lift = shadowAmount * 70 * shadowWeight;
+      r += lift;
+      g += lift;
+      b += lift;
+    } else {
+      const darken = -shadowAmount * 55 * shadowWeight;
+      r -= darken;
+      g -= darken;
+      b -= darken;
+    }
+
+    if (highlightAmount >= 0) {
+      const lift = highlightAmount * 55 * highlightWeight;
+      r += lift;
+      g += lift;
+      b += lift;
+    } else {
+      const darken = -highlightAmount * 55 * highlightWeight;
+      r -= darken;
+      g -= darken;
+      b -= darken;
+    }
+
+    if (whiteAmount !== 0) {
+      const whiteWeight = smoothstep(0.55, 1, luminance);
+      const delta = whiteAmount * 45 * whiteWeight;
+      r += delta;
+      g += delta;
+      b += delta;
+    }
+
+    if (blackAmount !== 0) {
+      const blackWeight = 1 - smoothstep(0, 0.45, luminance);
+      const delta = blackAmount * 40 * blackWeight;
+      r += delta;
+      g += delta;
+      b += delta;
+    }
+
+    r = (r - 127.5) * contrast + 127.5;
+    g = (g - 127.5) * contrast + 127.5;
+    b = (b - 127.5) * contrast + 127.5;
+
+    // Temperature: negative is cooler, positive is warmer.
+    r += temperature * 32;
+    b -= temperature * 32;
+
+    // Tint: positive is magenta, negative is green.
+    r += tint * 18;
+    b += tint * 18;
+    g -= tint * 22;
+
+    const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const vibranceBoost = vibrance * (1 - Math.min(1, Math.abs(r - g) + Math.abs(g - b) + Math.abs(b - r)) / 382);
+    const saturationFactor = saturation + vibranceBoost;
+
+    r = gray + (r - gray) * saturationFactor;
+    g = gray + (g - gray) * saturationFactor;
+    b = gray + (b - gray) * saturationFactor;
+
+    data[i] = clamp(r);
+    data[i + 1] = clamp(g);
+    data[i + 2] = clamp(b);
+  }
+
+  return source;
+}
+
 function App() {
   const [view, setView] = useState<View>("library");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -47,21 +163,22 @@ function App() {
   const [zoom, setZoom] = useState(1);
   const [adjustments, setAdjustments] = useState<Adjustments>(DEFAULT_ADJUSTMENTS);
   const [selectedTool, setSelectedTool] = useState("Picker");
+  const [isRendering, setIsRendering] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const displayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const renderFrameRef = useRef<number | null>(null);
 
-  const imageStyle = useMemo<React.CSSProperties>(() => {
-    const exposure = adjustments.exposure;
-    const contrast = 1 + adjustments.contrast / 100;
-    const saturation = 1 + adjustments.saturation / 100;
-    const brightness = Math.max(0.05, 1 + exposure / 5);
-    return {
-      transform: `scale(${zoom})`,
-      filter: `brightness(${brightness}) contrast(${contrast}) saturate(${saturation})`,
-    };
-  }, [adjustments, zoom]);
+  const imageStyle = useMemo<React.CSSProperties>(() => ({
+    transform: `scale(${zoom})`,
+  }), [zoom]);
 
   function updateAdjustment(key: AdjustmentKey, value: number) {
-    setAdjustments((current) => ({ ...current, [key]: value }));
+    setAdjustments((current) => ({
+      ...current,
+      [key]: Number.isFinite(value) ? value : 0,
+    }));
   }
 
   function importImage() {
@@ -72,7 +189,8 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     if (imageUrl) URL.revokeObjectURL(imageUrl);
-    setImageUrl(URL.createObjectURL(file));
+    const url = URL.createObjectURL(file);
+    setImageUrl(url);
     setImageName(file.name);
     setView("develop");
     setZoom(1);
@@ -100,6 +218,64 @@ function App() {
   function resetAdjustments() {
     setAdjustments(DEFAULT_ADJUSTMENTS);
   }
+
+  useEffect(() => {
+    if (!imageUrl) return;
+    const image = new Image();
+    image.onload = () => {
+      imageRef.current = image;
+      const source = document.createElement("canvas");
+      const maxPreviewDimension = 3200;
+      const scale = Math.min(1, maxPreviewDimension / Math.max(image.naturalWidth, image.naturalHeight));
+      source.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      source.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = source.getContext("2d", { willReadFrequently: true });
+      if (!context) return;
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      context.drawImage(image, 0, 0, source.width, source.height);
+      sourceCanvasRef.current = source;
+
+      const display = displayCanvasRef.current;
+      if (display) {
+        display.width = source.width;
+        display.height = source.height;
+      }
+      renderImage();
+    };
+    image.src = imageUrl;
+
+    return () => {
+      image.onload = null;
+      imageRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [imageUrl]);
+
+  function renderImage() {
+    if (renderFrameRef.current !== null) cancelAnimationFrame(renderFrameRef.current);
+    renderFrameRef.current = requestAnimationFrame(() => {
+      const source = sourceCanvasRef.current;
+      const display = displayCanvasRef.current;
+      if (!source || !display) return;
+      const sourceContext = source.getContext("2d", { willReadFrequently: true });
+      const displayContext = display.getContext("2d");
+      if (!sourceContext || !displayContext) return;
+
+      setIsRendering(true);
+      const sourceData = sourceContext.getImageData(0, 0, source.width, source.height);
+      const processed = applyAdjustments(sourceData, adjustments);
+      display.width = source.width;
+      display.height = source.height;
+      displayContext.putImageData(processed, 0, 0);
+      setIsRendering(false);
+    });
+  }
+
+  useEffect(() => {
+    if (sourceCanvasRef.current && displayCanvasRef.current) renderImage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adjustments]);
 
   return (
     <div className="app-shell">
@@ -130,7 +306,7 @@ function App() {
               event.preventDefault();
               setZoom((current) => Math.min(8, Math.max(0.1, current * (event.deltaY < 0 ? 1.1 : 0.9))));
             }}>
-              <img src={imageUrl} alt={imageName} style={imageStyle} draggable={false} />
+              <canvas ref={displayCanvasRef} style={imageStyle} draggable={false} />
             </div>
           ) : (
             <button className="canvas-empty" onClick={importImage}>
@@ -147,6 +323,7 @@ function App() {
               <button onClick={() => setZoom(1)}>FIT</button>
             </div>
           )}
+          {isRendering && <div className="render-status">RENDERING</div>}
         </section>
 
         <aside className="rightbar">
@@ -179,7 +356,7 @@ function App() {
         </aside>
       </main>
 
-      <footer><span>ENGINE • READY</span><span>{imageUrl ? imageName : "NO PHOTO"}</span><span>TOOL • {selectedTool.toUpperCase()}</span></footer>
+      <footer><span>ENGINE • {isRendering ? "RENDERING" : "READY"}</span><span>{imageUrl ? imageName : "NO PHOTO"}</span><span>TOOL • {selectedTool.toUpperCase()}</span></footer>
     </div>
   );
 }
