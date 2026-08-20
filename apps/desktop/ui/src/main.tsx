@@ -4,10 +4,13 @@ import "./styles.css";
 
 type View = "library" | "develop";
 type AdjustmentKey = "exposure" | "contrast" | "highlights" | "shadows" | "whites" | "blacks" | "temperature" | "tint" | "vibrance" | "saturation";
+type DetailKey = "sharpening" | "noiseReduction" | "colorNoiseReduction";
 type Adjustments = Record<AdjustmentKey, number>;
+type DetailAdjustments = Record<DetailKey, number>;
 type Control = [AdjustmentKey, string, number, number, number];
 
 const DEFAULT_ADJUSTMENTS: Adjustments = { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, temperature: 0, tint: 0, vibrance: 0, saturation: 0 };
+const DEFAULT_DETAIL: DetailAdjustments = { sharpening: 0, noiseReduction: 0, colorNoiseReduction: 0 };
 const BASIC_CONTROLS: Control[] = [["exposure", "Exposure", -5, 5, 0.01], ["contrast", "Contrast", -100, 100, 1], ["highlights", "Highlights", -100, 100, 1], ["shadows", "Shadows", -100, 100, 1], ["whites", "Whites", -100, 100, 1], ["blacks", "Blacks", -100, 100, 1]];
 const COLOR_CONTROLS: Control[] = [["temperature", "Temperature", -100, 100, 1], ["tint", "Tint", -100, 100, 1], ["vibrance", "Vibrance", -100, 100, 1], ["saturation", "Saturation", -100, 100, 1]];
 
@@ -15,7 +18,7 @@ function formatValue(value: number, step: number) { return step < 1 ? value.toFi
 function clamp(value: number, min = 0, max = 255) { return Math.min(max, Math.max(min, value)); }
 function smoothstep(edge0: number, edge1: number, value: number) { const t = clamp((value - edge0) / (edge1 - edge0), 0, 1); return t * t * (3 - 2 * t); }
 
-function applyAdjustments(source: ImageData, adjustments: Adjustments) {
+function applyAdjustments(source: ImageData, adjustments: Adjustments, detail: DetailAdjustments) {
   const data = source.data;
   const exposureFactor = Math.pow(2, adjustments.exposure);
   const contrast = 1 + adjustments.contrast / 100;
@@ -27,6 +30,7 @@ function applyAdjustments(source: ImageData, adjustments: Adjustments) {
   const shadowAmount = adjustments.shadows / 100;
   const whiteAmount = adjustments.whites / 100;
   const blackAmount = adjustments.blacks / 100;
+
   for (let i = 0; i < data.length; i += 4) {
     let r = data[i] * exposureFactor, g = data[i + 1] * exposureFactor, b = data[i + 2] * exposureFactor;
     const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
@@ -43,7 +47,64 @@ function applyAdjustments(source: ImageData, adjustments: Adjustments) {
     r = gray + (r - gray) * saturationFactor; g = gray + (g - gray) * saturationFactor; b = gray + (b - gray) * saturationFactor;
     data[i] = clamp(r); data[i + 1] = clamp(g); data[i + 2] = clamp(b);
   }
+
+  applyNoiseReduction(data, source.width, source.height, detail.noiseReduction, detail.colorNoiseReduction);
+  applySharpening(data, source.width, source.height, detail.sharpening);
   return source;
+}
+
+function sample(data: Uint8ClampedArray, width: number, height: number, x: number, y: number, channel: number) {
+  const sx = Math.max(0, Math.min(width - 1, x));
+  const sy = Math.max(0, Math.min(height - 1, y));
+  return data[(sy * width + sx) * 4 + channel];
+}
+
+function applyNoiseReduction(data: Uint8ClampedArray, width: number, height: number, luminanceAmount: number, colorAmount: number) {
+  if (luminanceAmount <= 0 && colorAmount <= 0) return;
+  const source = new Uint8ClampedArray(data);
+  const strength = Math.min(1, luminanceAmount / 100);
+  const colorStrength = Math.min(1, colorAmount / 100);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const centerR = source[i], centerG = source[i + 1], centerB = source[i + 2];
+      const nR = (sample(source, width, height, x - 1, y, 0) + sample(source, width, height, x + 1, y, 0) + sample(source, width, height, x, y - 1, 0) + sample(source, width, height, x, y + 1, 0)) / 4;
+      const nG = (sample(source, width, height, x - 1, y, 1) + sample(source, width, height, x + 1, y, 1) + sample(source, width, height, x, y - 1, 1) + sample(source, width, height, x, y + 1, 1)) / 4;
+      const nB = (sample(source, width, height, x - 1, y, 2) + sample(source, width, height, x + 1, y, 2) + sample(source, width, height, x, y - 1, 2) + sample(source, width, height, x, y + 1, 2)) / 4;
+      const centerL = 0.2126 * centerR + 0.7152 * centerG + 0.0722 * centerB;
+      const neighborL = 0.2126 * nR + 0.7152 * nG + 0.0722 * nB;
+      const edge = Math.min(1, Math.abs(centerL - neighborL) / 48);
+      const lumaBlend = strength * (1 - edge * 0.65);
+      data[i] = clamp(centerR + (nR - centerR) * lumaBlend);
+      data[i + 1] = clamp(centerG + (nG - centerG) * lumaBlend);
+      data[i + 2] = clamp(centerB + (nB - centerB) * lumaBlend);
+      if (colorStrength > 0) {
+        const gray = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+        const chromaBlend = colorStrength * 0.65;
+        data[i] = clamp(data[i] + (gray - data[i]) * chromaBlend);
+        data[i + 1] = clamp(data[i + 1] + (gray - data[i + 1]) * chromaBlend);
+        data[i + 2] = clamp(data[i + 2] + (gray - data[i + 2]) * chromaBlend);
+      }
+      data[i + 3] = source[i + 3];
+    }
+  }
+}
+
+function applySharpening(data: Uint8ClampedArray, width: number, height: number, amount: number) {
+  if (amount <= 0) return;
+  const source = new Uint8ClampedArray(data);
+  const strength = Math.min(1.5, amount / 70);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const center = source[i + c];
+        const average = (sample(source, width, height, x - 1, y, c) + sample(source, width, height, x + 1, y, c) + sample(source, width, height, x, y - 1, c) + sample(source, width, height, x, y + 1, c)) / 4;
+        data[i + c] = clamp(center + (center - average) * strength);
+      }
+      data[i + 3] = source[i + 3];
+    }
+  }
 }
 
 function App() {
@@ -52,6 +113,7 @@ function App() {
   const [imageName, setImageName] = useState("");
   const [zoom, setZoom] = useState(1);
   const [adjustments, setAdjustments] = useState<Adjustments>(DEFAULT_ADJUSTMENTS);
+  const [detail, setDetail] = useState<DetailAdjustments>(DEFAULT_DETAIL);
   const [selectedTool, setSelectedTool] = useState("Picker");
   const [isRendering, setIsRendering] = useState(false);
   const [isDraggingSlider, setIsDraggingSlider] = useState(false);
@@ -61,21 +123,23 @@ function App() {
   const sourceImageDataRef = useRef<ImageData | null>(null);
   const renderFrameRef = useRef<number | null>(null);
   const pendingAdjustmentsRef = useRef(adjustments);
+  const pendingDetailRef = useRef(detail);
 
   const imageStyle = useMemo<React.CSSProperties>(() => ({ transform: `scale(${zoom})` }), [zoom]);
   function updateAdjustment(key: AdjustmentKey, value: number) { setAdjustments(current => ({ ...current, [key]: Number.isFinite(value) ? value : 0 })); }
+  function updateDetail(key: DetailKey, value: number) { setDetail(current => ({ ...current, [key]: Number.isFinite(value) ? value : 0 })); }
   function importImage() { fileInputRef.current?.click(); }
   function handleFile(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]; if (!file) return;
     if (imageUrl) URL.revokeObjectURL(imageUrl);
-    setImageUrl(URL.createObjectURL(file)); setImageName(file.name); setView("develop"); setZoom(1); setAdjustments(DEFAULT_ADJUSTMENTS); event.target.value = "";
+    setImageUrl(URL.createObjectURL(file)); setImageName(file.name); setView("develop"); setZoom(1); setAdjustments(DEFAULT_ADJUSTMENTS); setDetail(DEFAULT_DETAIL); event.target.value = "";
   }
   function exportEdit() {
-    const payload = { app: "Aetherlight 2.0", version: "0.1.0", image: imageName || null, zoom, adjustments };
+    const payload = { app: "Aetherlight 2.0", version: "0.1.0", image: imageName || null, zoom, adjustments, detail };
     const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${imageName.replace(/\.[^.]+$/, "") || "aetherlight-edit"}.aetherlight.json`; anchor.click(); URL.revokeObjectURL(url);
   }
-  function resetAdjustments() { setAdjustments(DEFAULT_ADJUSTMENTS); }
+  function resetAdjustments() { setAdjustments(DEFAULT_ADJUSTMENTS); setDetail(DEFAULT_DETAIL); }
 
   useEffect(() => {
     if (!imageUrl) return;
@@ -110,17 +174,15 @@ function App() {
           preview.height = Math.max(1, Math.round(display.height * previewScale));
           const pctx = preview.getContext("2d", { willReadFrequently: true });
           if (!pctx) return;
-          pctx.imageSmoothingEnabled = true;
-          pctx.imageSmoothingQuality = "medium";
+          pctx.imageSmoothingEnabled = true; pctx.imageSmoothingQuality = "medium";
           pctx.drawImage(sourceCanvasRef.current!, 0, 0, preview.width, preview.height);
-          const processed = applyAdjustments(pctx.getImageData(0, 0, preview.width, preview.height), pendingAdjustmentsRef.current);
+          const processed = applyAdjustments(pctx.getImageData(0, 0, preview.width, preview.height), pendingAdjustmentsRef.current, pendingDetailRef.current);
           pctx.putImageData(processed, 0, 0);
-          displayContext.clearRect(0, 0, display.width, display.height);
-          displayContext.imageSmoothingEnabled = true;
+          displayContext.clearRect(0, 0, display.width, display.height); displayContext.imageSmoothingEnabled = true;
           displayContext.drawImage(preview, 0, 0, display.width, display.height);
         } else {
           const copy = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
-          const processed = applyAdjustments(copy, pendingAdjustmentsRef.current);
+          const processed = applyAdjustments(copy, pendingAdjustmentsRef.current, pendingDetailRef.current);
           displayContext.putImageData(processed, 0, 0);
         }
       } catch (error) {
@@ -131,13 +193,14 @@ function App() {
     });
   }
 
-  useEffect(() => { pendingAdjustmentsRef.current = adjustments; renderImage(isDraggingSlider); }, [adjustments, isDraggingSlider]);
+  useEffect(() => { pendingAdjustmentsRef.current = adjustments; renderImage(isDraggingSlider); }, [adjustments, detail, isDraggingSlider]);
+  useEffect(() => { pendingDetailRef.current = detail; }, [detail]);
 
   return <div className="app-shell">
     <header className="topbar"><div className="brand">AETHERLIGHT <span>2.0</span></div><nav><button className={`nav ${view === "library" ? "active" : ""}`} onClick={() => setView("library")}>LIBRARY</button><button className={`nav ${view === "develop" ? "active" : ""}`} onClick={() => setView("develop")}>DEVELOP</button></nav><div className="actions"><button onClick={importImage}>Import</button><button onClick={exportEdit} disabled={!imageName}>Export</button></div><input ref={fileInputRef} className="hidden-input" type="file" accept="image/*" onChange={handleFile} /></header>
     <main className="workspace"><aside className="leftbar"><div className="tool-title">TOOLS</div>{["Crop", "Heal", "Mask", "Picker"].map(tool => <button key={tool} className={selectedTool === tool ? "selected" : ""} onClick={() => setSelectedTool(tool)}>{tool}</button>)}</aside>
       <section className="canvas">{imageUrl ? <div className="image-stage" onWheel={event => { event.preventDefault(); setZoom(current => Math.min(8, Math.max(0.1, current * (event.deltaY < 0 ? 1.1 : 0.9)))); }}><canvas ref={displayCanvasRef} style={imageStyle} draggable={false} /></div> : <button className="canvas-empty" onClick={importImage}><strong>Aetherlight 2.0</strong><span>GPU-first RAW photo development</span><small>Click to import an image</small></button>}{imageUrl && <div className="zoom-bar"><button onClick={() => setZoom(z => Math.max(0.1, z / 1.15))}>−</button><span>{Math.round(zoom * 100)}%</span><button onClick={() => setZoom(z => Math.min(8, z * 1.15))}>+</button><button onClick={() => setZoom(1)}>FIT</button></div>}{isRendering && <div className="render-status">RENDERING</div>}</section>
-      <aside className="rightbar">{view === "library" ? <div className="library-panel"><div className="panel-title">LIBRARY</div>{!imageUrl ? <div className="empty-panel">No photos imported.<br /><button onClick={importImage}>IMPORT PHOTO</button></div> : <div className="library-card" onClick={() => setView("develop")}><img src={imageUrl} alt="" /><div><strong>{imageName}</strong><span>Ready to develop</span></div></div>}</div> : <div className="develop-panel"><div className="panel-heading-row"><div className="panel-title">ADJUSTMENTS</div><button className="reset" onClick={resetAdjustments}>RESET</button></div><section><h3>BASIC</h3>{BASIC_CONTROLS.map(([key, label, min, max, step]) => <Slider key={key} label={label} value={adjustments[key]} min={min} max={max} step={step} onChange={v => updateAdjustment(key, v)} onDragStart={() => setIsDraggingSlider(true)} onDragEnd={() => setIsDraggingSlider(false)} />)}</section><section><h3>COLOR</h3>{COLOR_CONTROLS.map(([key, label, min, max, step]) => <Slider key={key} label={label} value={adjustments[key]} min={min} max={max} step={step} onChange={v => updateAdjustment(key, v)} onDragStart={() => setIsDraggingSlider(true)} onDragEnd={() => setIsDraggingSlider(false)} />)}</section><section><h3>CURVES</h3><button className="feature-button">OPEN CURVE EDITOR</button></section><section><h3>DETAIL</h3><Slider label="Sharpening" value={0} min={0} max={100} step={1} onChange={() => {}} /><Slider label="Noise Reduction" value={0} min={0} max={100} step={1} onChange={() => {}} /></section><section><h3>MASKING</h3><div className="mask-buttons"><button onClick={() => setSelectedTool("Brush Mask")}>BRUSH</button><button onClick={() => setSelectedTool("Linear Mask")}>LINEAR</button><button onClick={() => setSelectedTool("Radial Mask")}>RADIAL</button><button onClick={() => setSelectedTool("AI Mask")}>AI</button></div></section></div>}</aside></main>
+      <aside className="rightbar">{view === "library" ? <div className="library-panel"><div className="panel-title">LIBRARY</div>{!imageUrl ? <div className="empty-panel">No photos imported.<br /><button onClick={importImage}>IMPORT PHOTO</button></div> : <div className="library-card" onClick={() => setView("develop")}><img src={imageUrl} alt="" /><div><strong>{imageName}</strong><span>Ready to develop</span></div></div>}</div> : <div className="develop-panel"><div className="panel-heading-row"><div className="panel-title">ADJUSTMENTS</div><button className="reset" onClick={resetAdjustments}>RESET</button></div><section><h3>BASIC</h3>{BASIC_CONTROLS.map(([key, label, min, max, step]) => <Slider key={key} label={label} value={adjustments[key]} min={min} max={max} step={step} onChange={v => updateAdjustment(key, v)} onDragStart={() => setIsDraggingSlider(true)} onDragEnd={() => setIsDraggingSlider(false)} />)}</section><section><h3>COLOR</h3>{COLOR_CONTROLS.map(([key, label, min, max, step]) => <Slider key={key} label={label} value={adjustments[key]} min={min} max={max} step={step} onChange={v => updateAdjustment(key, v)} onDragStart={() => setIsDraggingSlider(true)} onDragEnd={() => setIsDraggingSlider(false)} />)}</section><section><h3>CURVES</h3><button className="feature-button">OPEN CURVE EDITOR</button></section><section><h3>DETAIL</h3><Slider label="Sharpening" value={detail.sharpening} min={0} max={100} step={1} onChange={v => updateDetail("sharpening", v)} onDragStart={() => setIsDraggingSlider(true)} onDragEnd={() => setIsDraggingSlider(false)} /><Slider label="Noise Reduction" value={detail.noiseReduction} min={0} max={100} step={1} onChange={v => updateDetail("noiseReduction", v)} onDragStart={() => setIsDraggingSlider(true)} onDragEnd={() => setIsDraggingSlider(false)} /><Slider label="Color Noise" value={detail.colorNoiseReduction} min={0} max={100} step={1} onChange={v => updateDetail("colorNoiseReduction", v)} onDragStart={() => setIsDraggingSlider(true)} onDragEnd={() => setIsDraggingSlider(false)} /></section><section><h3>MASKING</h3><div className="mask-buttons"><button onClick={() => setSelectedTool("Brush Mask")}>BRUSH</button><button onClick={() => setSelectedTool("Linear Mask")}>LINEAR</button><button onClick={() => setSelectedTool("Radial Mask")}>RADIAL</button><button onClick={() => setSelectedTool("AI Mask")}>AI</button></div></section></div>}</aside></main>
     <footer><span>ENGINE • {isRendering ? "RENDERING" : "READY"}</span><span>{imageUrl ? imageName : "NO PHOTO"}</span><span>TOOL • {selectedTool.toUpperCase()}</span></footer>
   </div>;
 }
