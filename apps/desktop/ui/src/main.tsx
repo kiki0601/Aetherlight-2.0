@@ -160,6 +160,13 @@ function applyMask(base: ImageData, maskCanvas: HTMLCanvasElement, maskAdjustmen
   return base;
 }
 
+async function decodeOrientedBitmap(url: string): Promise<ImageBitmap> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Image fetch failed: ${response.status}`);
+  const blob = await response.blob();
+  return createImageBitmap(blob, { imageOrientation: "from-image", premultiplyAlpha: "none", colorSpaceConversion: "default" });
+}
+
 function App() {
   const [view, setView] = useState<View>("library");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -249,14 +256,17 @@ function App() {
 
   useEffect(() => {
     if (!imageUrl) return;
-    const image = new Image();
-    image.onload = () => {
+    let cancelled = false;
+    let bitmap: ImageBitmap | null = null;
+    decodeOrientedBitmap(imageUrl).then(decoded => {
+      if (cancelled) { decoded.close(); return; }
+      bitmap = decoded;
       const source = document.createElement("canvas");
       const maxPreviewDimension = 1800;
-      const scale = Math.min(1, maxPreviewDimension / Math.max(image.naturalWidth, image.naturalHeight));
-      source.width = Math.max(1, Math.round(image.naturalWidth * scale)); source.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const scale = Math.min(1, maxPreviewDimension / Math.max(bitmap.width, bitmap.height));
+      source.width = Math.max(1, Math.round(bitmap.width * scale)); source.height = Math.max(1, Math.round(bitmap.height * scale));
       const context = source.getContext("2d", { willReadFrequently: true }); if (!context) return;
-      context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.drawImage(image, 0, 0, source.width, source.height);
+      context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.drawImage(bitmap, 0, 0, source.width, source.height);
       sourceCanvasRef.current = source; sourceImageDataRef.current = context.getImageData(0, 0, source.width, source.height);
       const display = displayCanvasRef.current, mask = maskCanvasRef.current, overlay = overlayCanvasRef.current;
       if (display) { display.width = source.width; display.height = source.height; }
@@ -264,9 +274,11 @@ function App() {
       if (overlay) { overlay.width = source.width; overlay.height = source.height; overlay.getContext("2d")?.clearRect(0, 0, overlay.width, overlay.height); }
       maskExistsRef.current = false; setHasMask(false); setCanvasSize({ width: source.width, height: source.height });
       renderImage(false);
-    };
-    image.src = imageUrl;
-    return () => { image.onload = null; };
+      bitmap?.close(); bitmap = null;
+    }).catch(error => {
+      console.error("Aetherlight image decode error:", error);
+    });
+    return () => { cancelled = true; bitmap?.close(); };
   }, [imageUrl]);
 
   function renderImage(interactive = isDraggingSlider) {
