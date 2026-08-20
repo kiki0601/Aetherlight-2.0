@@ -102,22 +102,32 @@ function App() {
       if (!source || !display) return;
       const displayContext = display.getContext("2d"); if (!displayContext) return;
       setIsRendering(true);
-      if (interactive) {
-        const previewScale = Math.min(1, 900 / Math.max(display.width, display.height));
-        const preview = document.createElement("canvas");
-        preview.width = Math.max(1, Math.round(display.width * previewScale)); preview.height = Math.max(1, Math.round(display.height * previewScale));
-        const pctx = preview.getContext("2d", { willReadFrequently: true }); if (!pctx) return;
-        pctx.drawImage(sourceCanvasRef.current!, 0, 0, preview.width, preview.height);
-        const processed = applyAdjustments(pctx.getImageData(0, 0, preview.width, preview.height), pendingAdjustmentsRef.current);
-        displayContext.clearRect(0, 0, display.width, display.height);
-        displayContext.drawImage(preview, 0, 0, display.width, display.height);
-        pctx.putImageData(processed, 0, 0);
-        displayContext.drawImage(preview, 0, 0, display.width, display.height);
-      } else {
-        const processed = applyAdjustments(source.slice(), pendingAdjustmentsRef.current);
-        displayContext.putImageData(processed, 0, 0);
+      try {
+        if (interactive) {
+          const previewScale = Math.min(1, 900 / Math.max(display.width, display.height));
+          const preview = document.createElement("canvas");
+          preview.width = Math.max(1, Math.round(display.width * previewScale));
+          preview.height = Math.max(1, Math.round(display.height * previewScale));
+          const pctx = preview.getContext("2d", { willReadFrequently: true });
+          if (!pctx) return;
+          pctx.imageSmoothingEnabled = true;
+          pctx.imageSmoothingQuality = "medium";
+          pctx.drawImage(sourceCanvasRef.current!, 0, 0, preview.width, preview.height);
+          const processed = applyAdjustments(pctx.getImageData(0, 0, preview.width, preview.height), pendingAdjustmentsRef.current);
+          pctx.putImageData(processed, 0, 0);
+          displayContext.clearRect(0, 0, display.width, display.height);
+          displayContext.imageSmoothingEnabled = true;
+          displayContext.drawImage(preview, 0, 0, display.width, display.height);
+        } else {
+          const copy = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+          const processed = applyAdjustments(copy, pendingAdjustmentsRef.current);
+          displayContext.putImageData(processed, 0, 0);
+        }
+      } catch (error) {
+        console.error("Aetherlight render error:", error);
+      } finally {
+        setIsRendering(false);
       }
-      setIsRendering(false);
     });
   }
 
