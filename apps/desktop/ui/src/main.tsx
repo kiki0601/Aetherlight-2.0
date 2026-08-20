@@ -16,7 +16,6 @@ type AdjustmentKey =
   | "saturation";
 
 type Adjustments = Record<AdjustmentKey, number>;
-
 type Control = [AdjustmentKey, string, number, number, number];
 
 const DEFAULT_ADJUSTMENTS: Adjustments = {
@@ -57,12 +56,13 @@ function clamp(value: number, min = 0, max = 255) {
 }
 
 function smoothstep(edge0: number, edge1: number, value: number) {
-  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  const t = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0)));
   return t * t * (3 - 2 * t);
 }
 
 function applyAdjustments(source: ImageData, adjustments: Adjustments) {
-  const data = source.data;
+  const output = new ImageData(new Uint8ClampedArray(source.data), source.width, source.height);
+  const data = output.data;
   const exposureFactor = Math.pow(2, adjustments.exposure);
   const contrast = 1 + adjustments.contrast / 100;
   const saturation = 1 + adjustments.saturation / 100;
@@ -131,17 +131,16 @@ function applyAdjustments(source: ImageData, adjustments: Adjustments) {
     g = (g - 127.5) * contrast + 127.5;
     b = (b - 127.5) * contrast + 127.5;
 
-    // Temperature: negative is cooler, positive is warmer.
     r += temperature * 32;
     b -= temperature * 32;
 
-    // Tint: positive is magenta, negative is green.
     r += tint * 18;
     b += tint * 18;
     g -= tint * 22;
 
     const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    const vibranceBoost = vibrance * (1 - Math.min(1, Math.abs(r - g) + Math.abs(g - b) + Math.abs(b - r)) / 382);
+    const chroma = Math.abs(r - g) + Math.abs(g - b) + Math.abs(b - r);
+    const vibranceBoost = vibrance * (1 - Math.min(1, chroma / 382));
     const saturationFactor = saturation + vibranceBoost;
 
     r = gray + (r - gray) * saturationFactor;
@@ -153,7 +152,7 @@ function applyAdjustments(source: ImageData, adjustments: Adjustments) {
     data[i + 2] = clamp(b);
   }
 
-  return source;
+  return output;
 }
 
 function App() {
@@ -163,11 +162,10 @@ function App() {
   const [zoom, setZoom] = useState(1);
   const [adjustments, setAdjustments] = useState<Adjustments>(DEFAULT_ADJUSTMENTS);
   const [selectedTool, setSelectedTool] = useState("Picker");
-  const [isRendering, setIsRendering] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const imageRef = useRef<HTMLImageElement | null>(null);
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const displayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sourceDataRef = useRef<ImageData | null>(null);
   const renderFrameRef = useRef<number | null>(null);
 
   const imageStyle = useMemo<React.CSSProperties>(() => ({
@@ -195,6 +193,7 @@ function App() {
     setView("develop");
     setZoom(1);
     setAdjustments(DEFAULT_ADJUSTMENTS);
+    sourceDataRef.current = null;
     event.target.value = "";
   }
 
@@ -223,9 +222,10 @@ function App() {
     if (!imageUrl) return;
     const image = new Image();
     image.onload = () => {
-      imageRef.current = image;
       const source = document.createElement("canvas");
-      const maxPreviewDimension = 3200;
+      // Interactive editing should never process a huge camera frame on every mouse move.
+      // A higher-resolution render pipeline can be added later for final/export rendering.
+      const maxPreviewDimension = 1800;
       const scale = Math.min(1, maxPreviewDimension / Math.max(image.naturalWidth, image.naturalHeight));
       source.width = Math.max(1, Math.round(image.naturalWidth * scale));
       source.height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -235,6 +235,7 @@ function App() {
       context.imageSmoothingQuality = "high";
       context.drawImage(image, 0, 0, source.width, source.height);
       sourceCanvasRef.current = source;
+      sourceDataRef.current = context.getImageData(0, 0, source.width, source.height);
 
       const display = displayCanvasRef.current;
       if (display) {
@@ -247,7 +248,6 @@ function App() {
 
     return () => {
       image.onload = null;
-      imageRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imageUrl]);
@@ -255,25 +255,19 @@ function App() {
   function renderImage() {
     if (renderFrameRef.current !== null) cancelAnimationFrame(renderFrameRef.current);
     renderFrameRef.current = requestAnimationFrame(() => {
-      const source = sourceCanvasRef.current;
+      const sourceData = sourceDataRef.current;
       const display = displayCanvasRef.current;
-      if (!source || !display) return;
-      const sourceContext = source.getContext("2d", { willReadFrequently: true });
+      if (!sourceData || !display) return;
       const displayContext = display.getContext("2d");
-      if (!sourceContext || !displayContext) return;
+      if (!displayContext) return;
 
-      setIsRendering(true);
-      const sourceData = sourceContext.getImageData(0, 0, source.width, source.height);
       const processed = applyAdjustments(sourceData, adjustments);
-      display.width = source.width;
-      display.height = source.height;
       displayContext.putImageData(processed, 0, 0);
-      setIsRendering(false);
     });
   }
 
   useEffect(() => {
-    if (sourceCanvasRef.current && displayCanvasRef.current) renderImage();
+    if (sourceDataRef.current && displayCanvasRef.current) renderImage();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adjustments]);
 
@@ -323,7 +317,6 @@ function App() {
               <button onClick={() => setZoom(1)}>FIT</button>
             </div>
           )}
-          {isRendering && <div className="render-status">RENDERING</div>}
         </section>
 
         <aside className="rightbar">
@@ -356,7 +349,7 @@ function App() {
         </aside>
       </main>
 
-      <footer><span>ENGINE • {isRendering ? "RENDERING" : "READY"}</span><span>{imageUrl ? imageName : "NO PHOTO"}</span><span>TOOL • {selectedTool.toUpperCase()}</span></footer>
+      <footer><span>ENGINE • READY</span><span>{imageUrl ? imageName : "NO PHOTO"}</span><span>TOOL • {selectedTool.toUpperCase()}</span></footer>
     </div>
   );
 }
