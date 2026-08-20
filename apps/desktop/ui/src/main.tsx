@@ -64,28 +64,65 @@ function applyNoiseReduction(data: Uint8ClampedArray, width: number, height: num
   const source = new Uint8ClampedArray(data);
   const strength = Math.min(1, luminanceAmount / 100);
   const colorStrength = Math.min(1, colorAmount / 100);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      const centerR = source[i], centerG = source[i + 1], centerB = source[i + 2];
-      const nR = (sample(source, width, height, x - 1, y, 0) + sample(source, width, height, x + 1, y, 0) + sample(source, width, height, x, y - 1, 0) + sample(source, width, height, x, y + 1, 0)) / 4;
-      const nG = (sample(source, width, height, x - 1, y, 1) + sample(source, width, height, x + 1, y, 1) + sample(source, width, height, x, y - 1, 1) + sample(source, width, height, x, y + 1, 1)) / 4;
-      const nB = (sample(source, width, height, x - 1, y, 2) + sample(source, width, height, x + 1, y, 2) + sample(source, width, height, x, y - 1, 2) + sample(source, width, height, x, y + 1, 2)) / 4;
-      const centerL = 0.2126 * centerR + 0.7152 * centerG + 0.0722 * centerB;
-      const neighborL = 0.2126 * nR + 0.7152 * nG + 0.0722 * nB;
-      const edge = Math.min(1, Math.abs(centerL - neighborL) / 48);
-      const lumaBlend = strength * (1 - edge * 0.65);
-      data[i] = clamp(centerR + (nR - centerR) * lumaBlend);
-      data[i + 1] = clamp(centerG + (nG - centerG) * lumaBlend);
-      data[i + 2] = clamp(centerB + (nB - centerB) * lumaBlend);
-      if (colorStrength > 0) {
-        const gray = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-        const chromaBlend = colorStrength * 0.65;
-        data[i] = clamp(data[i] + (gray - data[i]) * chromaBlend);
-        data[i + 1] = clamp(data[i + 1] + (gray - data[i + 1]) * chromaBlend);
-        data[i + 2] = clamp(data[i + 2] + (gray - data[i + 2]) * chromaBlend);
+
+  if (strength > 0) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        const centerR = source[i], centerG = source[i + 1], centerB = source[i + 2];
+        const nR = (sample(source, width, height, x - 1, y, 0) + sample(source, width, height, x + 1, y, 0) + sample(source, width, height, x, y - 1, 0) + sample(source, width, height, x, y + 1, 0)) / 4;
+        const nG = (sample(source, width, height, x - 1, y, 1) + sample(source, width, height, x + 1, y, 1) + sample(source, width, height, x, y - 1, 1) + sample(source, width, height, x, y + 1, 1)) / 4;
+        const nB = (sample(source, width, height, x - 1, y, 2) + sample(source, width, height, x + 1, y, 2) + sample(source, width, height, x, y - 1, 2) + sample(source, width, height, x, y + 1, 2)) / 4;
+        const centerL = 0.2126 * centerR + 0.7152 * centerG + 0.0722 * centerB;
+        const neighborL = 0.2126 * nR + 0.7152 * nG + 0.0722 * nB;
+        const edge = Math.min(1, Math.abs(centerL - neighborL) / 48);
+        const lumaBlend = strength * (1 - edge * 0.65);
+        data[i] = clamp(centerR + (nR - centerR) * lumaBlend);
+        data[i + 1] = clamp(centerG + (nG - centerG) * lumaBlend);
+        data[i + 2] = clamp(centerB + (nB - centerB) * lumaBlend);
+        data[i + 3] = source[i + 3];
       }
-      data[i + 3] = source[i + 3];
+    }
+  }
+
+  if (colorStrength > 0) {
+    const chromaSource = new Uint8ClampedArray(data);
+    const chromaBlend = colorStrength * 0.85;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        const r = chromaSource[i], g = chromaSource[i + 1], b = chromaSource[i + 2];
+        const centerY = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const centerCb = b - centerY;
+        const centerCr = r - centerY;
+
+        let neighborCb = 0, neighborCr = 0, neighborY = 0;
+        const offsets = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+        for (const [dx, dy] of offsets) {
+          const nx = Math.max(0, Math.min(width - 1, x + dx));
+          const ny = Math.max(0, Math.min(height - 1, y + dy));
+          const ni = (ny * width + nx) * 4;
+          const nr = chromaSource[ni], ng = chromaSource[ni + 1], nb = chromaSource[ni + 2];
+          const nyLum = 0.2126 * nr + 0.7152 * ng + 0.0722 * nb;
+          neighborY += nyLum;
+          neighborCb += nb - nyLum;
+          neighborCr += nr - nyLum;
+        }
+        neighborY /= 4; neighborCb /= 4; neighborCr /= 4;
+
+        const edge = Math.min(1, Math.abs(centerY - neighborY) / 32);
+        const blend = chromaBlend * (1 - edge * 0.75);
+        const cb = centerCb + (neighborCb - centerCb) * blend;
+        const cr = centerCr + (neighborCr - centerCr) * blend;
+        const outR = centerY + cr;
+        const outB = centerY + cb;
+        const outG = (centerY - 0.2126 * outR - 0.0722 * outB) / 0.7152;
+
+        data[i] = clamp(outR);
+        data[i + 1] = clamp(outG);
+        data[i + 2] = clamp(outB);
+        data[i + 3] = chromaSource[i + 3];
+      }
     }
   }
 }
