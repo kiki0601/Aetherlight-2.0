@@ -31,7 +31,6 @@ let panel: HTMLDivElement | null = null;
 let cursor: HTMLDivElement | null = null;
 let basePixels: ImageData | null = null;
 let lastPoint: { x: number; y: number } | null = null;
-let syncFrame = 0;
 
 function clamp(v: number, a = 0, b = 255) { return Math.min(b, Math.max(a, v)); }
 function smooth(v: number) { return v * v * (3 - 2 * v); }
@@ -60,7 +59,6 @@ function syncGeometry() {
     c.width = display.width; c.height = display.height;
     c.style.left = `${left}px`; c.style.top = `${top}px`; c.style.width = `${dr.width}px`; c.style.height = `${dr.height}px`;
   }
-  if (cursor) cursor.style.transform = "translate(-50%, -50%)";
 }
 
 function startBase() {
@@ -184,7 +182,7 @@ function bind() {
     const end = () => { painting=false; lastPoint=null; };
     overlayCanvas.addEventListener("pointerup", end); overlayCanvas.addEventListener("pointercancel", end); overlayCanvas.addEventListener("pointerleave", end);
   }
-  syncGeometry(); syncFrame = requestAnimationFrame(bind);
+  syncGeometry(); requestAnimationFrame(bind);
 }
 
 bind();
