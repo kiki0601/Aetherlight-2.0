@@ -4,7 +4,6 @@ let basePixels: ImageData | null = null;
 let lastMaskSignature = '';
 let renderQueued = false;
 
-function overlay() { return document.querySelector<HTMLCanvasElement>('.mask-overlay-canvas'); }
 function mask() { return document.querySelector<HTMLCanvasElement>('.mask-data-canvas'); }
 function display() { return document.querySelector<HTMLCanvasElement>('.image-display'); }
 
@@ -118,8 +117,11 @@ function bind() {
       input.dataset.maskRenderBound = '1';
       input.addEventListener('input', () => queueRender(true));
     });
-    const current = signature((m.getContext('2d', { willReadFrequently: true })?.getImageData(0, 0, m.width, m.height).data || new Uint8ClampedArray()).data);
-    if (current !== lastMaskSignature) queueRender(false);
+    const pixels = m.getContext('2d', { willReadFrequently: true })?.getImageData(0, 0, m.width, m.height).data;
+    if (pixels) {
+      const current = signature(pixels);
+      if (current !== lastMaskSignature) queueRender(false);
+    }
   }
   requestAnimationFrame(bind);
 }
