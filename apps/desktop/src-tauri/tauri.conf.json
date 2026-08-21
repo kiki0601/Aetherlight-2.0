@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.kiki0601.aetherlight",
   "build": {
+    "devUrl": "http://localhost:5173",
     "frontendDist": "../ui"
   },
   "app": {
