@@ -201,7 +201,8 @@ function buildPanel() {
   panel.querySelector('[data-action="erase"]')?.addEventListener('click', () => {
     config.erasing = !config.erasing;
     clickMaskButton(config.erasing ? 'ERASE' : 'PAINT');
-    panel?.querySelector('[data-action="erase"]')!.textContent = config.erasing ? 'PAINT' : 'ERASE';
+    const eraseButton = panel?.querySelector<HTMLButtonElement>('[data-action="erase"]');
+    if (eraseButton) eraseButton.textContent = config.erasing ? 'PAINT' : 'ERASE';
   });
   panel.querySelector('[data-action="overlay"]')?.addEventListener('click', () => {
     config.overlay = !config.overlay;
